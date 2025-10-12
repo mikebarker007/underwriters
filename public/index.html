@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Application Upload</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; max-width: 720px; margin: 0 auto; padding: 24px; }
+    label { display:block; margin: 12px 0 6px; }
+    select, textarea, input[type=file], button { width:100%; padding:10px; margin-bottom:12px; box-sizing:border-box; }
+    button { background:#0d6efd; color:#fff; border:0; border-radius:6px; cursor:pointer; }
+    button:hover { background:#0b5ed7; }
+    .note { color:#555; font-size: 0.95em; }
+    .success { background:#e6ffed; padding:12px; border-radius:6px; margin-top: 12px; }
+    .error { background:#ffe6e6; padding:12px; border-radius:6px; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <h2>Submit Your Application</h2>
+  <p class="note">Choose your class of business, add any additional context, and upload the completed application form (PDF/DOC/DOCX).</p>
+
+  <form id="appForm" action="/upload" method="post" enctype="multipart/form-data">
+    <label for="classOfBusiness"><strong>Class of Business</strong></label>
+    <select id="classOfBusiness" name="classOfBusiness" required>
+      <option value="">Select one</option>
+      <option value="physicians">Physicians</option>
+      <option value="physician assistants">Physician Assistants</option>
+      <option value="phlebotomists">Phlebotomists</option>
+      <!-- Add more options to exactly match Airtable's choices -->
+    </select>
+
+    <label for="moreInfo"><strong>More Information</strong></label>
+    <textarea id="moreInfo" name="moreInfo" rows="5" placeholder="Add any notes for the underwriter..."></textarea>
+
+    <label for="applicationFile"><strong>Upload Application (PDF/DOC/DOCX)</strong></label>
+    <input id="applicationFile" name="applicationFile" type="file" required />
+
+    <button type="submit">Submit</button>
+  </form>
+
+  <div id="status"></div>
+
+  <script>
+    const form = document.getElementById('appForm');
+    const statusBox = document.getElementById('status');
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      statusBox.textContent = 'Uploading...';
+      statusBox.className = '';
+
+      const formData = new FormData(form);
+      try {
+        const res = await fetch('/upload', {
+          method: 'POST',
+          body: formData
+        });
+        const text = await res.text();
+        if (res.ok) {
+          statusBox.textContent = text;
+          statusBox.className = 'success';
+          form.reset();
+        } else {
+          statusBox.textContent = text || 'Upload failed';
+          statusBox.className = 'error';
+        }
+      } catch (err) {
+        statusBox.textContent = 'Network error';
+        statusBox.className = 'error';
+      }
+    });
+  </script>
+</body>
+</html>
