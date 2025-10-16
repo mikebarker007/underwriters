@@ -7,7 +7,7 @@
   <style>
     body { font-family: system-ui, Arial, sans-serif; max-width: 720px; margin: 0 auto; padding: 24px; }
     label { display:block; margin: 12px 0 6px; }
-    select, textarea, input[type=file], button { width:100%; padding:10px; margin-bottom:12px; box-sizing:border-box; }
+    select, textarea, input[type=email], input[type=file], button { width:100%; padding:10px; margin-bottom:12px; box-sizing:border-box; }
     button { background:#0d6efd; color:#fff; border:0; border-radius:6px; cursor:pointer; }
     button:hover { background:#0b5ed7; }
     .note { color:#555; font-size: 0.95em; }
@@ -17,12 +17,25 @@
 </head>
 <body>
   <h2>Submit Your Application</h2>
-  <p class="note">Choose your class of business, add any additional context, and upload the completed application form (PDF/DOC/DOCX).</p>
+  <p class="note">
+    Enter your email (we’ll auto-detect your class from our records). If it doesn’t auto-fill,
+    choose your class as a fallback, add context, and upload your file (PDF/DOC/DOCX).
+  </p>
 
   <form id="appForm" action="/upload" method="post" enctype="multipart/form-data">
-    <label for="classOfBusiness"><strong>Class of Business</strong></label>
-    <select id="classOfBusiness" name="classOfBusiness" required>
-      <option value="">Select one</option>
+    <label for="submitterEmail"><strong>Your Email</strong></label>
+    <input
+      id="submitterEmail"
+      name="submitterEmail"
+      type="email"
+      placeholder="you@example.com"
+      autocomplete="email"
+      required
+    />
+
+    <label for="classOfBusiness"><strong>Class of Business (optional)</strong></label>
+    <select id="classOfBusiness" name="classOfBusiness">
+      <option value="">Leave blank to auto-detect</option>
       <option value="physicians">Physicians</option>
       <option value="physician assistants">Physician Assistants</option>
       <option value="phlebotomists">Phlebotomists</option>
@@ -33,7 +46,7 @@
     <textarea id="moreInfo" name="moreInfo" rows="5" placeholder="Add any notes for the underwriter..."></textarea>
 
     <label for="applicationFile"><strong>Upload Application (PDF/DOC/DOCX)</strong></label>
-    <input id="applicationFile" name="applicationFile" type="file" required />
+    <input id="applicationFile" name="applicationFile" type="file" accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required />
 
     <button type="submit">Submit</button>
   </form>
