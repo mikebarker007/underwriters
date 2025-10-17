@@ -15,9 +15,9 @@ const {
   // Airtable (base + tables)
   AIRTABLE_PAT,
   AIRTABLE_BASE_ID,
-  AIRTABLE_APPS_TABLE = 'Applications',
-  AIRTABLE_APPLICANTS_TABLE_ID,          // Table A (Applicants)
-  AIRTABLE_UNDERWRITERS_TABLE_ID,        // Table B (Underwriters/Categories)
+  AIRTABLE_APPS_TABLE = 'Applications',       // DEST table (submissions)
+  AIRTABLE_APPLICANTS_TABLE_ID,               // Table A (Applicants)
+  AIRTABLE_UNDERWRITERS_TABLE_ID,             // Table B (Underwriters/Categories)
   APPLICANTS_EMAIL_FIELD = 'Email',
   APPLICANTS_CLASS_FIELD = 'Class of Business',
   UW_CLASS_FIELD = 'class',
@@ -37,7 +37,13 @@ const {
   SPACES_REGION = 'us-east-1',
   SPACES_BUCKET,
   SPACES_KEY,
-  SPACES_SECRET
+  SPACES_SECRET,
+
+  // Submissions table field overrides (use exact Airtable column names)
+  APPS_EMAIL_FIELD,                           // default 'Email'
+  APPS_CLASS_FIELD,                           // default 'Class of Business'
+  APPS_NOTES_FIELD,                           // default 'More Information'
+  APPS_FILE_FIELD                             // default 'Uploaded File'
 } = process.env;
 
 function requireEnv(name) {
@@ -154,10 +160,8 @@ async function sendEmailBrevo(toList, subject, html) {
 
 async function sendEmails(notifyList, subject, html) {
   if (BREVO_API_KEY) {
-    // Brevo API (single call with multiple recipients)
     await sendEmailBrevo(notifyList, subject, html);
   } else {
-    // SMTP fallback (one message per recipient)
     await Promise.all(
       notifyList.map(to =>
         transporter.sendMail({
@@ -207,14 +211,22 @@ app.post('/upload', upload.single('applicationFile'), async (req, res) => {
     await s3.send(put);
     const publicUrl = `https://${SPACES_BUCKET}.${SPACES_ENDPOINT}/${key}`;
 
-    // Create Applications record (field names must match your table)
+    // ===== Create Submissions record (configurable field names) =====
+    const EMAIL_F = APPS_EMAIL_FIELD || 'Email';
+    const CLASS_F = APPS_CLASS_FIELD || 'Class of Business';
+    const NOTES_F = APPS_NOTES_FIELD || 'More Information';
+    const FILE_F  = APPS_FILE_FIELD  || 'Uploaded File';
+
+    // tiny debug to confirm table + fields in DO logs
+    console.log('Writing to table:', AIRTABLE_APPS_TABLE, { EMAIL_F, CLASS_F, NOTES_F, FILE_F });
+
     await baseAT(AIRTABLE_APPS_TABLE).create([
       {
         fields: {
-          'Email': submitterEmail || '',
-          'Class of Business': effectiveClass || '',
-          'More Information': moreInfo || '',
-          'Uploaded File': [{ url: publicUrl, filename: file.originalname }]
+          [EMAIL_F]: submitterEmail || '',
+          [CLASS_F]: effectiveClass || '',
+          [NOTES_F]: moreInfo || '',
+          [FILE_F]: [{ url: publicUrl, filename: file.originalname }]
         }
       }
     ]);
