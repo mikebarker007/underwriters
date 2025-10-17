@@ -211,7 +211,7 @@ app.post('/upload', upload.single('applicationFile'), async (req, res) => {
     await baseAT(AIRTABLE_APPS_TABLE).create([
       {
         fields: {
-          'email': submitterEmail || '',
+          'Email': submitterEmail || '',
           'Class of Business': effectiveClass || '',
           'More Information': moreInfo || '',
           'Uploaded File': [{ url: publicUrl, filename: file.originalname }]
