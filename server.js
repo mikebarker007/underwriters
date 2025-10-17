@@ -7,6 +7,7 @@ import path from 'path';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import crypto from 'crypto';
 
+// ===== Env =====
 const {
   PORT = 8080,
   HOST = '0.0.0.0',
@@ -22,7 +23,8 @@ const {
   UW_CLASS_FIELD = 'class',
   UW_EMAIL_FIELD = 'submission email',
 
-  // Email
+  // Email (Brevo API preferred, SMTP fallback)
+  BREVO_API_KEY,
   SMTP_HOST = 'smtp-relay.brevo.com',
   SMTP_PORT = '587',
   SMTP_USER,
@@ -44,18 +46,16 @@ function requireEnv(name) {
     process.exit(1);
   }
 }
-[
-  'AIRTABLE_PAT',
-  'AIRTABLE_BASE_ID',
-  'SMTP_USER',
-  'SMTP_PASS',
-  'SMTP_FROM',
-  'SPACES_ENDPOINT',
-  'SPACES_BUCKET',
-  'SPACES_KEY',
-  'SPACES_SECRET'
-].forEach(requireEnv);
 
+// Required for core functionality
+['AIRTABLE_PAT', 'AIRTABLE_BASE_ID', 'SMTP_FROM', 'SPACES_ENDPOINT', 'SPACES_BUCKET', 'SPACES_KEY', 'SPACES_SECRET'].forEach(requireEnv);
+
+// Email credentials: require either Brevo API key OR SMTP user/pass
+if (!BREVO_API_KEY) {
+  ['SMTP_USER', 'SMTP_PASS'].forEach(requireEnv);
+}
+
+// ===== Clients =====
 const baseAT = new Airtable({ apiKey: AIRTABLE_PAT }).base(AIRTABLE_BASE_ID);
 
 const s3 = new S3Client({
@@ -68,14 +68,17 @@ const s3 = new S3Client({
   }
 });
 
-const transporter = nodemailer.createTransport({
-  host: SMTP_HOST,
-  port: Number(SMTP_PORT),
-  secure: false,
-  auth: { user: SMTP_USER, pass: SMTP_PASS },
-  tls: { rejectUnauthorized: true }
-});
+const transporter = (!BREVO_API_KEY)
+  ? nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: Number(SMTP_PORT),
+      secure: false,
+      auth: { user: SMTP_USER, pass: SMTP_PASS },
+      tls: { rejectUnauthorized: true }
+    })
+  : null;
 
+// ===== App =====
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
@@ -124,6 +127,51 @@ async function airtableFindAll(tableIdOrName, filterByFormula) {
   return out;
 }
 
+// ---- Email helpers ----
+async function sendEmailBrevo(toList, subject, html) {
+  const apiKey = BREVO_API_KEY;
+  if (!apiKey) throw new Error('BREVO_API_KEY missing');
+  const payload = {
+    sender: { email: SMTP_FROM },
+    to: toList.map(e => ({ email: e })),
+    subject,
+    htmlContent: html
+  };
+  const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: {
+      'api-key': apiKey,
+      'content-type': 'application/json',
+      'accept': 'application/json'
+    },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Brevo API failed: ${res.status} ${text}`);
+  }
+}
+
+async function sendEmails(notifyList, subject, html) {
+  if (BREVO_API_KEY) {
+    // Brevo API (single call with multiple recipients)
+    await sendEmailBrevo(notifyList, subject, html);
+  } else {
+    // SMTP fallback (one message per recipient)
+    await Promise.all(
+      notifyList.map(to =>
+        transporter.sendMail({
+          from: SMTP_FROM,
+          to,
+          subject,
+          html
+        })
+      )
+    );
+  }
+}
+
+// ---- Routes ----
 app.get('/healthz', (req, res) => res.status(200).send('ok'));
 
 app.post('/upload', upload.single('applicationFile'), async (req, res) => {
@@ -159,7 +207,7 @@ app.post('/upload', upload.single('applicationFile'), async (req, res) => {
     await s3.send(put);
     const publicUrl = `https://${SPACES_BUCKET}.${SPACES_ENDPOINT}/${key}`;
 
-    // Create Applications record
+    // Create Applications record (field names must match your table)
     await baseAT(AIRTABLE_APPS_TABLE).create([
       {
         fields: {
@@ -181,7 +229,7 @@ app.post('/upload', upload.single('applicationFile'), async (req, res) => {
       const emails = uwRecords.flatMap(r => {
         const v = r.get(UW_EMAIL_FIELD);
         if (!v) return [];
-        if (Array.isArray(v)) return v;            // multi-value
+        if (Array.isArray(v)) return v;            // multi-value cell
         return v.toString().split(',');            // allow comma-separated
       });
       matchedRecipients = [...new Set(emails.map(e => e.toString().trim()).filter(Boolean))];
@@ -205,16 +253,7 @@ app.post('/upload', upload.single('applicationFile'), async (req, res) => {
     `;
 
     const subject = `New Application: ${effectiveClass || 'Unspecified Class'}`;
-    await Promise.all(
-      notifyList.map(to =>
-        transporter.sendMail({
-          from: SMTP_FROM,
-          to,
-          subject,
-          html
-        })
-      )
-    );
+    await sendEmails(notifyList, subject, html);
 
     res.status(200).send('Application submitted and notifications sent!');
   } catch (err) {
