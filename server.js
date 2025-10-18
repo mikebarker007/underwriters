@@ -18,7 +18,7 @@ const {
   AIRTABLE_APPS_TABLE,                         // DEST table (submissions) – no default
   AIRTABLE_APPLICANTS_TABLE_ID,               // Table A (Applicants)
   AIRTABLE_UNDERWRITERS_TABLE_ID,             // Table B (Underwriters/Categories)
-  AIRTABLE_CLASSES_TABLE_ID,                  // <-- NEW: Linked Classes table id (optional, has fallback below)
+  AIRTABLE_CLASSES_TABLE_ID,                  // Linked Classes table id (optional, has fallback below)
   APPLICANTS_EMAIL_FIELD = 'Email',
   APPLICANTS_CLASS_FIELD = 'Class of Business',
   UW_CLASS_FIELD = 'class',
@@ -179,13 +179,14 @@ app.post('/upload', upload.single('applicationFile'), async (req,res)=>{
     let classLink = [];
     if (effectiveClass){
       const classId = await getOrCreateClassIdByName(effectiveClass);
-      if (classId) classLink = [{ id: classId }];
+      if (classId) classLink = [classId]; // <-- array of record ID strings
+      console.log('Linking class:', { effectiveClass, classId, classLink });
     }
 
     await baseAT(AIRTABLE_APPS_TABLE).create([{
       fields: {
         [EMAIL_F]: submitterEmail || '',
-        [CLASS_F]: classLink, // linked record expects [{ id: 'rec...' }]
+        [CLASS_F]: classLink, // ['recXXXX...']
         [NOTES_F]: moreInfo || '',
         [FILE_F]: [{ url: publicUrl, filename: file.originalname }]
       }
