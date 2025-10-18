@@ -18,6 +18,7 @@ const {
   AIRTABLE_APPS_TABLE,                         // DEST table (submissions) – no default
   AIRTABLE_APPLICANTS_TABLE_ID,               // Table A (Applicants)
   AIRTABLE_UNDERWRITERS_TABLE_ID,             // Table B (Underwriters/Categories)
+  AIRTABLE_CLASSES_TABLE_ID,                  // <-- NEW: Linked Classes table id (optional, has fallback below)
   APPLICANTS_EMAIL_FIELD = 'Email',
   APPLICANTS_CLASS_FIELD = 'Class of Business',
   UW_CLASS_FIELD = 'class',
@@ -45,6 +46,9 @@ const {
   APPS_NOTES_FIELD,                           // default 'More Information'
   APPS_FILE_FIELD                             // default 'Uploaded File'
 } = process.env;
+
+// === Derived config ===
+const CLASS_TABLE_ID = AIRTABLE_CLASSES_TABLE_ID || 'tblQ2rxDjTA1yMtxQ'; // fallback to your provided table id
 
 // === print what the app sees at runtime ===
 console.log('AIRTABLE_APPS_TABLE =', AIRTABLE_APPS_TABLE);
@@ -107,7 +111,9 @@ async function airtableFindOne(tableIdOrName, filterByFormula){
   return page[0] || null;
 }
 async function airtableFindAll(tableIdOrName, filterByFormula){
-  const out=[]; await baseAT(tableIdOrName).select({ filterByFormula }).eachPage((recs,next)=>{ out.push(...recs); next(); }); return out;
+  const out=[];
+  await baseAT(tableIdOrName).select({ filterByFormula }).eachPage((recs,next)=>{ out.push(...recs); next(); });
+  return out;
 }
 async function getOrCreateClassIdByName(name){
   if (!name) return null;
@@ -117,6 +123,7 @@ async function getOrCreateClassIdByName(name){
   const created = await baseAT(CLASS_TABLE_ID).create([{ fields: { Name: name } }]);
   return created[0].id;
 }
+
 // ---- Email helpers ----
 async function sendEmailBrevo(toList, subject, html){
   const apiKey = process.env.BREVO_API_KEY;
@@ -161,22 +168,24 @@ app.post('/upload', upload.single('applicationFile'), async (req,res)=>{
     const publicUrl = `https://${SPACES_BUCKET}.${SPACES_ENDPOINT}/${key}`;
 
     // Create Submissions record (configurable field names)
-    const CLASS_TABLE_ID = 'tblQ2rxDjTA1yMtxQ';
     const EMAIL_F = process.env.APPS_EMAIL_FIELD || 'Email';
     const CLASS_F = process.env.APPS_CLASS_FIELD || 'Class of Business';
     const NOTES_F = process.env.APPS_NOTES_FIELD || 'More Information';
     const FILE_F  = process.env.APPS_FILE_FIELD  || 'Uploaded File';
 
     console.log('Writing to table:', AIRTABLE_APPS_TABLE, { EMAIL_F, CLASS_F, NOTES_F, FILE_F });
+
+    // Resolve linked record for Class of Business
     let classLink = [];
-  if (effectiveClass){
-  const classId = await getOrCreateClassIdByName(effectiveClass);
-  if (classId) classLink = [{ id: classId }];
-}
+    if (effectiveClass){
+      const classId = await getOrCreateClassIdByName(effectiveClass);
+      if (classId) classLink = [{ id: classId }];
+    }
+
     await baseAT(AIRTABLE_APPS_TABLE).create([{
       fields: {
         [EMAIL_F]: submitterEmail || '',
-        [CLASS_F]: classLink, // <-- linked record expects [{ id: 'rec...' }]
+        [CLASS_F]: classLink, // linked record expects [{ id: 'rec...' }]
         [NOTES_F]: moreInfo || '',
         [FILE_F]: [{ url: publicUrl, filename: file.originalname }]
       }
