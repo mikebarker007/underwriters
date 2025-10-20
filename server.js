@@ -15,7 +15,7 @@ const {
   // Airtable (base + tables)
   AIRTABLE_PAT,
   AIRTABLE_BASE_ID,
-  AIRTABLE_APPS_TABLE,                         // DEST table (submissions) – no default
+  AIRTABLE_APPS_TABLE,                         // DEST table (submissions)
   AIRTABLE_APPLICANTS_TABLE_ID,               // Table A (Applicants)
   AIRTABLE_UNDERWRITERS_TABLE_ID,             // Table B (Underwriters/Categories)
   AIRTABLE_CLASSES_TABLE_ID,                  // Linked Classes table id (optional, has fallback below)
@@ -48,7 +48,7 @@ const {
 } = process.env;
 
 // === Derived config ===
-const CLASS_TABLE_ID = AIRTABLE_CLASSES_TABLE_ID || 'tblQ2rxDjTA1yMtxQ'; // fallback to your provided table id
+const CLASS_TABLE_ID = AIRTABLE_CLASSES_TABLE_ID || 'tblQ2rxDjTA1yMtxQ';
 
 // === print what the app sees at runtime ===
 console.log('AIRTABLE_APPS_TABLE =', AIRTABLE_APPS_TABLE);
@@ -135,7 +135,17 @@ async function sendEmailBrevo(toList, subject, html){
   if (!res.ok){ const text=await res.text(); throw new Error(`Brevo API failed: ${res.status} ${text}`); }
 }
 async function sendEmails(list, subject, html){
-  if (process.env.BREVO_API_KEY) return sendEmailBrevo(list, subject, html);
+  if (process.env.BREVO_API_KEY) {
+    try {
+      return await sendEmailBrevo(list, subject, html);
+    } catch (err) {
+      console.error('Brevo send failed, will try SMTP if available:', err?.message || err);
+      if (transporter) {
+        return Promise.all(list.map(to => transporter.sendMail({ from: SMTP_FROM, to, subject, html })));
+      }
+      throw err;
+    }
+  }
   return Promise.all(list.map(to => transporter.sendMail({ from: SMTP_FROM, to, subject, html })));
 }
 
@@ -175,18 +185,36 @@ app.post('/upload', upload.single('applicationFile'), async (req,res)=>{
 
     console.log('Writing to table:', AIRTABLE_APPS_TABLE, { EMAIL_F, CLASS_F, NOTES_F, FILE_F });
 
-    // Resolve linked record for Class of Business
+    // Resolve linked record for Class of Business (supports incoming recID or Name)
     let classLink = [];
+    let classRecordId = null;
+    let classDisplayName = (effectiveClass || '').trim();
+
     if (effectiveClass){
-      const classId = await getOrCreateClassIdByName(effectiveClass);
-      if (classId) classLink = [classId]; // <-- array of record ID strings
-      console.log('Linking class:', { effectiveClass, classId, classLink });
+      if (/^rec[0-9A-Za-z]{14}$/.test(effectiveClass)) {
+        // already a record id
+        classRecordId = effectiveClass;
+      } else {
+        // treat as Name; find or create
+        classRecordId = await getOrCreateClassIdByName(effectiveClass);
+      }
+      if (classRecordId) {
+        classLink = [classRecordId]; // array of rec IDs
+        try {
+          const clsRec = await baseAT(CLASS_TABLE_ID).find(classRecordId);
+          const name = clsRec?.get('Name');
+          if (name) classDisplayName = name.toString();
+        } catch(e){
+          console.error('Could not fetch class display name:', e?.message || e);
+        }
+      }
+      console.log('Linking class:', { effectiveClass, classRecordId, classDisplayName, classLink });
     }
 
     await baseAT(AIRTABLE_APPS_TABLE).create([{
       fields: {
         [EMAIL_F]: submitterEmail || '',
-        [CLASS_F]: classLink, // ['recXXXX...']
+        [CLASS_F]: classLink, // linked record
         [NOTES_F]: moreInfo || '',
         [FILE_F]: [{ url: publicUrl, filename: file.originalname }]
       }
@@ -194,11 +222,23 @@ app.post('/upload', upload.single('applicationFile'), async (req,res)=>{
 
     // Underwriter match + email
     let matchedRecipients = [];
-    if (effectiveClass && AIRTABLE_UNDERWRITERS_TABLE_ID){
-      const uwRecords = await airtableFindAll(
-        AIRTABLE_UNDERWRITERS_TABLE_ID,
-        `{${UW_CLASS_FIELD}} = "${escapeForAirtableFormulaDoubleQuotes(effectiveClass)}"`
-      );
+    if ((classRecordId || classDisplayName) && AIRTABLE_UNDERWRITERS_TABLE_ID){
+      // Try as linked-record field first (classRecordId within ARRAYJOIN)
+      let uwRecords = [];
+      if (classRecordId) {
+        uwRecords = await airtableFindAll(
+          AIRTABLE_UNDERWRITERS_TABLE_ID,
+          `FIND("${classRecordId}", ARRAYJOIN({${UW_CLASS_FIELD}})) > 0`
+        );
+      }
+      // Fallback to name match (if UW_CLASS_FIELD is text/single select)
+      if (!uwRecords.length && classDisplayName) {
+        uwRecords = await airtableFindAll(
+          AIRTABLE_UNDERWRITERS_TABLE_ID,
+          `{${UW_CLASS_FIELD}} = "${escapeForAirtableFormulaDoubleQuotes(classDisplayName)}"`
+        );
+      }
+
       const emails = uwRecords.flatMap(r=>{
         const v = r.get(UW_EMAIL_FIELD);
         if (!v) return [];
@@ -208,19 +248,30 @@ app.post('/upload', upload.single('applicationFile'), async (req,res)=>{
     }
 
     const notifyList = OVERRIDE_NOTIFICATION_EMAIL ? [OVERRIDE_NOTIFICATION_EMAIL] : matchedRecipients;
-    if (!notifyList.length) return res.status(200).send('Uploaded and saved. No matching underwriters found.');
 
     const html = `
       <p><strong>New application received</strong></p>
       <p><strong>Submitted By:</strong> ${submitterEmail}</p>
-      <p><strong>Class of Business:</strong> ${effectiveClass || '(not provided)'}</p>
+      <p><strong>Class of Business:</strong> ${classDisplayName || '(not provided)'}</p>
       <p><strong>More Information:</strong><br>${(moreInfo || 'None provided').replace(/\n/g,'<br>')}</p>
       <p><strong>File:</strong> <a href="${publicUrl}">${safeName(file.originalname)}</a></p>
     `;
-    const subject = `New Application: ${effectiveClass || 'Unspecified Class'}`;
-    await sendEmails(notifyList, subject, html);
+    const subject = `New Application: ${classDisplayName || 'Unspecified Class'}`;
 
-    res.status(200).send('Application submitted and notifications sent!');
+    try{
+      if (notifyList.length){
+        await sendEmails(notifyList, subject, html);
+      }
+    }catch(e){
+      console.error('Notification error:', e?.message || e);
+      // continue; record and file already saved
+    }
+
+    res.status(200).send(
+      notifyList.length
+        ? 'Application submitted and notifications sent (or attempted).'
+        : 'Uploaded and saved. No matching underwriters found.'
+    );
   }catch(err){
     console.error(err);
     res.status(500).send('Server error');
