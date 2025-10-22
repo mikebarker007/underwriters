@@ -219,7 +219,11 @@ app.post('/upload', upload.single('applicationFile'), async (req,res)=>{
       matchedRecipients=[...new Set(emails.map(e=>e.toString().trim()).filter(Boolean))];
     }
 
-    const notifyList=OVERRIDE_NOTIFICATION_EMAIL?[OVERRIDE_NOTIFICATION_EMAIL]:matchedRecipients;
+    // ✅ override disabled unless explicitly truthy
+    const useOverride = OVERRIDE_NOTIFICATION_EMAIL && !/^(false|0|off)$/i.test(OVERRIDE_NOTIFICATION_EMAIL);
+    const notifyList = useOverride ? [OVERRIDE_NOTIFICATION_EMAIL] : matchedRecipients;
+    console.log('Notify recipients:', notifyList);
+
     const html=`<p><strong>New application received</strong></p>
 <p><strong>Submitted By:</strong> ${submitterEmail}</p>
 <p><strong>Class of Business:</strong> ${classDisplayName||'(not provided)'}</p>
