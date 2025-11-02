@@ -45,7 +45,7 @@ const {
   APPS_CLASS_FIELD,
   APPS_NOTES_FIELD,
   APPS_FILE_FIELD,
-  APPS_OWNER_EMAIL_FIELD           // <-- NEW: defaults to 'owner_email'
+  APPS_OWNER_EMAIL_FIELD // <-- NEW (defaults to 'owner_email')
 } = process.env;
 
 const CLASS_TABLE_ID = AIRTABLE_CLASSES_TABLE_ID || 'tblQ2rxDjTA1yMtxQ';
@@ -78,7 +78,7 @@ const transporter = (!BREVO_API_KEY)
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
-app.use(express.json()));
+app.use(express.json());
 app.use(express.static(path.join(process.cwd(), 'public')));
 
 const upload = multer({
@@ -94,10 +94,30 @@ const upload = multer({
 function yyyymm(){ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; }
 function safeName(name){ return name.replace(/[^\w.\-()+ ]+/g,'_'); }
 function escapeForAirtableFormulaDoubleQuotes(s=''){ return s.replace(/"/g,'\\"'); }
-function firstEmail(val){
-  if (!val) return null;
-  if (Array.isArray(val)) return val.map(v=>v?.toString?.().trim()).find(Boolean) || null;
-  return val.toString().trim() || null;
+
+// Robust email extraction helpers
+function normalizeArray(val){
+  if (val == null) return [];
+  return Array.isArray(val) ? val : [val];
+}
+function pickFirstEmail(...candidates){
+  const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  for (const raw of candidates.flatMap(normalizeArray)) {
+    if (!raw) continue;
+    if (typeof raw === 'string') {
+      const s = raw.trim();
+      if (emailRe.test(s)) return s;
+      const hit = s.split(',').map(x=>x.trim()).find(x=>emailRe.test(x));
+      if (hit) return hit;
+    } else if (typeof raw === 'object') {
+      const e1 = raw.email?.toString?.().trim();
+      if (e1 && emailRe.test(e1)) return e1;
+      const t1 = raw.text?.toString?.().trim();
+      if (t1 && emailRe.test(t1)) return t1;
+      // ignore {id:'rec...'} objects (not resolvable here)
+    }
+  }
+  return null;
 }
 
 // ---- Airtable helpers ----
@@ -215,7 +235,7 @@ app.post('/upload', upload.single('applicationFile'), async (req,res)=>{
       const updateFields = { [EMAIL_F]: submitterEmail, [NOTES_F]: mergedNotes, [FILE_F]: newFiles };
       if (classLink.length) updateFields[CLASS_F] = classLink;
       await baseAT(AIRTABLE_APPS_TABLE).update([{ id: existing.id, fields: updateFields }]);
-      submissionRec = await baseAT(AIRTABLE_APPS_TABLE).find(existing.id); // re-fetch
+      submissionRec = await baseAT(AIRTABLE_APPS_TABLE).find(existing.id); // re-fetch to get latest owner email
     } else {
       const created = await baseAT(AIRTABLE_APPS_TABLE).create([{
         fields: {
@@ -246,15 +266,20 @@ app.post('/upload', upload.single('applicationFile'), async (req,res)=>{
     const notifyList = useOverride ? [OVERRIDE_NOTIFICATION_EMAIL] : matchedRecipients;
     console.log('Notify recipients:', notifyList);
 
-    // Reply-To = agent email on the submission record (owner_email)
+    // Reply-To = agent email on the submission record (owner_email or fallbacks)
     let replyToEmail = null;
     try {
-      const ownerVal = submissionRec?.get(OWNER_F);
-      replyToEmail = firstEmail(ownerVal) || submitterEmail; // fallback to submitter
+      const ownerVal = submissionRec?.get(OWNER_F);           // default owner_email
+      const alt1 = submissionRec?.get('Owner Email');         // common alt names
+      const alt2 = submissionRec?.get('Agent Email');
+      const alt3 = submissionRec?.get('Agent');               // collaborator/lookup
+      const alt4 = submissionRec?.get('Owner');               // collaborator/lookup
+      replyToEmail = pickFirstEmail(ownerVal, alt1, alt2, alt3, alt4) || submitterEmail;
     } catch (e) {
-      console.error('Could not read owner email:', e?.message || e);
+      console.error('Could not resolve Reply-To from submission fields:', e?.message || e);
       replyToEmail = submitterEmail;
     }
+    console.log('Email Reply-To resolved as:', replyToEmail);
 
     const html=`<p><strong>New application received</strong></p>
 <p><strong>Submitted By:</strong> ${submitterEmail}</p>
@@ -263,7 +288,7 @@ app.post('/upload', upload.single('applicationFile'), async (req,res)=>{
 <p><strong>File:</strong> <a href="${publicUrl}">${safeName(file.originalname)}</a></p>`;
     const subject=`New Application: ${classDisplayName||'Unspecified Class'}`;
     try{ if(notifyList.length) await sendEmails(notifyList,subject,html,replyToEmail);}
-    catch(e){ console.error('Notification error',e?.message||e); }
+    catch(e){ console.error('Notification error:',e?.message||e); }
 
     res.status(200).send(existing
       ? 'Existing record updated and notifications sent.'
