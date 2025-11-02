@@ -44,10 +44,12 @@ const {
   APPS_EMAIL_FIELD,
   APPS_CLASS_FIELD,
   APPS_NOTES_FIELD,
-  APPS_FILE_FIELD
+  APPS_FILE_FIELD,
+  APPS_OWNER_EMAIL_FIELD           // <-- NEW: defaults to 'owner_email'
 } = process.env;
 
 const CLASS_TABLE_ID = AIRTABLE_CLASSES_TABLE_ID || 'tblQ2rxDjTA1yMtxQ';
+const OWNER_F = APPS_OWNER_EMAIL_FIELD || 'owner_email'; // <-- NEW
 console.log('AIRTABLE_APPS_TABLE =', AIRTABLE_APPS_TABLE);
 
 // ---- helpers ----
@@ -76,7 +78,7 @@ const transporter = (!BREVO_API_KEY)
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
+app.use(express.json()));
 app.use(express.static(path.join(process.cwd(), 'public')));
 
 const upload = multer({
@@ -92,6 +94,11 @@ const upload = multer({
 function yyyymm(){ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; }
 function safeName(name){ return name.replace(/[^\w.\-()+ ]+/g,'_'); }
 function escapeForAirtableFormulaDoubleQuotes(s=''){ return s.replace(/"/g,'\\"'); }
+function firstEmail(val){
+  if (!val) return null;
+  if (Array.isArray(val)) return val.map(v=>v?.toString?.().trim()).find(Boolean) || null;
+  return val.toString().trim() || null;
+}
 
 // ---- Airtable helpers ----
 async function airtableFindOne(tableId, formula){
@@ -116,26 +123,36 @@ async function findSubmissionByEmail(tableId, emailField, email){
 }
 
 // ---- Email helpers ----
-async function sendEmailBrevo(toList, subject, html){
+async function sendEmailBrevo(toList, subject, html, replyTo){
   const apiKey = process.env.BREVO_API_KEY;
   if (!apiKey) throw new Error('BREVO_API_KEY missing');
-  const payload = { sender:{ email: process.env.SMTP_FROM }, to: toList.map(e=>({email:e})), subject, htmlContent: html };
+  const payload = {
+    sender: { email: process.env.SMTP_FROM },
+    to: toList.map(e=>({email:e})),
+    subject,
+    htmlContent: html,
+    ...(replyTo ? { replyTo: { email: replyTo } } : {})
+  };
   const res = await fetch('https://api.brevo.com/v3/smtp/email', {
     method:'POST', headers:{ 'api-key':apiKey, 'content-type':'application/json','accept':'application/json' }, body: JSON.stringify(payload)
   });
   if (!res.ok){ const text=await res.text(); throw new Error(`Brevo API failed: ${res.status} ${text}`); }
 }
-async function sendEmails(list, subject, html){
+async function sendEmails(list, subject, html, replyTo){
   if (process.env.BREVO_API_KEY) {
-    try { return await sendEmailBrevo(list, subject, html); }
+    try { return await sendEmailBrevo(list, subject, html, replyTo); }
     catch (err) {
       console.error('Brevo send failed, will try SMTP if available:', err?.message || err);
       if (transporter)
-        return Promise.all(list.map(to => transporter.sendMail({ from: SMTP_FROM, to, subject, html })));
+        return Promise.all(list.map(to => transporter.sendMail({
+          from: SMTP_FROM, to, subject, html, ...(replyTo ? { replyTo } : {})
+        })));
       throw err;
     }
   }
-  return Promise.all(list.map(to => transporter.sendMail({ from: SMTP_FROM, to, subject, html })));
+  return Promise.all(list.map(to => transporter.sendMail({
+    from: SMTP_FROM, to, subject, html, ...(replyTo ? { replyTo } : {})
+  })));
 }
 
 // ---- Routes ----
@@ -188,6 +205,7 @@ app.post('/upload', upload.single('applicationFile'), async (req,res)=>{
 
     // UPSERT by email
     const existing = await findSubmissionByEmail(AIRTABLE_APPS_TABLE, EMAIL_F, submitterEmail);
+    let submissionRec = existing;
     if (existing) {
       const existingFiles = Array.isArray(existing.get(FILE_F)) ? existing.get(FILE_F) : [];
       const newFiles = [...existingFiles, { url: publicUrl, filename: file.originalname }];
@@ -197,11 +215,15 @@ app.post('/upload', upload.single('applicationFile'), async (req,res)=>{
       const updateFields = { [EMAIL_F]: submitterEmail, [NOTES_F]: mergedNotes, [FILE_F]: newFiles };
       if (classLink.length) updateFields[CLASS_F] = classLink;
       await baseAT(AIRTABLE_APPS_TABLE).update([{ id: existing.id, fields: updateFields }]);
+      submissionRec = await baseAT(AIRTABLE_APPS_TABLE).find(existing.id); // re-fetch
     } else {
-      await baseAT(AIRTABLE_APPS_TABLE).create([{ fields: {
-        [EMAIL_F]: submitterEmail, [CLASS_F]: classLink,
-        [NOTES_F]: moreInfo || '', [FILE_F]: [{ url: publicUrl, filename: file.originalname }]
-      }}]);
+      const created = await baseAT(AIRTABLE_APPS_TABLE).create([{
+        fields: {
+          [EMAIL_F]: submitterEmail, [CLASS_F]: classLink,
+          [NOTES_F]: moreInfo || '', [FILE_F]: [{ url: publicUrl, filename: file.originalname }]
+        }
+      }]);
+      submissionRec = await baseAT(AIRTABLE_APPS_TABLE).find(created[0].id);
     }
 
     // underwriter match
@@ -219,10 +241,20 @@ app.post('/upload', upload.single('applicationFile'), async (req,res)=>{
       matchedRecipients=[...new Set(emails.map(e=>e.toString().trim()).filter(Boolean))];
     }
 
-    // ✅ override disabled unless explicitly truthy
+    // override disabled unless explicitly truthy
     const useOverride = OVERRIDE_NOTIFICATION_EMAIL && !/^(false|0|off)$/i.test(OVERRIDE_NOTIFICATION_EMAIL);
     const notifyList = useOverride ? [OVERRIDE_NOTIFICATION_EMAIL] : matchedRecipients;
     console.log('Notify recipients:', notifyList);
+
+    // Reply-To = agent email on the submission record (owner_email)
+    let replyToEmail = null;
+    try {
+      const ownerVal = submissionRec?.get(OWNER_F);
+      replyToEmail = firstEmail(ownerVal) || submitterEmail; // fallback to submitter
+    } catch (e) {
+      console.error('Could not read owner email:', e?.message || e);
+      replyToEmail = submitterEmail;
+    }
 
     const html=`<p><strong>New application received</strong></p>
 <p><strong>Submitted By:</strong> ${submitterEmail}</p>
@@ -230,7 +262,7 @@ app.post('/upload', upload.single('applicationFile'), async (req,res)=>{
 <p><strong>More Information:</strong><br>${(moreInfo||'None provided').replace(/\n/g,'<br>')}</p>
 <p><strong>File:</strong> <a href="${publicUrl}">${safeName(file.originalname)}</a></p>`;
     const subject=`New Application: ${classDisplayName||'Unspecified Class'}`;
-    try{ if(notifyList.length) await sendEmails(notifyList,subject,html);}
+    try{ if(notifyList.length) await sendEmails(notifyList,subject,html,replyToEmail);}
     catch(e){ console.error('Notification error',e?.message||e); }
 
     res.status(200).send(existing
